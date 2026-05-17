@@ -68,11 +68,12 @@ function generateId($length = 8) {
 
 function openai_image_call($prompt, $apiKey) {
     $payload = [
-        "model" => "gpt-image-1-mini",
+        "model" => "dall-e-3",
         "prompt" => $prompt,
         "n" => 1,
-        "size" => "1536x1024",
-        "quality" => "low",
+        "size" => "1024x1024",
+        "quality" => "standard",
+        "moderation" => "low",
         "response_format" => "url"
     ];
     $ch = curl_init("https://api.openai.com/v1/images/generations");
@@ -94,14 +95,14 @@ function openai_image_call($prompt, $apiKey) {
 }
 
 function processImages($html, $clientId, $apiKey) {
-    $pattern = '/IMAGE_PROMPT:\s*([^<"\'\s][^<"\'\r\n]*)/i';
+    $pattern = '/IMAGE_PROMPT:\s*([^"\'<>\r\n]+)/i';
     $assetsDir = __DIR__ . "/users/$clientId/assets";
     if (!file_exists($assetsDir)) mkdir($assetsDir, 0755, true);
 
     return preg_replace_callback($pattern, function($matches) use ($clientId, $apiKey, $assetsDir) {
         $prompt = trim($matches[1]);
         // Mandatory Suffix
-        $enhancedPrompt = $prompt . ", high quality, professional photography style";
+        $enhancedPrompt = $prompt . ", high quality, professional photography, photorealistic, 4k";
         
         $resp = openai_image_call($enhancedPrompt, $apiKey);
         
@@ -119,10 +120,9 @@ function processImages($html, $clientId, $apiKey) {
         } else {
             // Logging and fallback
             $errorMsg = isset($resp['error']['message']) ? $resp['error']['message'] : (isset($resp['error']) ? json_encode($resp['error']) : 'Unknown error');
-            $logEntry = "[" . date('Y-m-d H:i:s') . "] Image Gen Error for prompt '$prompt': " . $errorMsg . " Response: " . json_encode($resp) . "\n";
-            @file_put_contents(__DIR__ . "/error_log.txt", $logEntry, FILE_APPEND);
+            error_log("Image Gen Error for prompt '$prompt': " . $errorMsg . " Response: " . json_encode($resp));
             
-            return "https://via.placeholder.com/1536x1024?text=Image+Generation+Failed";
+            return "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAyNCIgaGVpZ2h0PSIxMDI0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9IiNjY2NjY2MiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZm9udC1mYW1pbHk9IkFyaWFsIiBmb250LXNpemU9IjMyIiBmaWxsPSIjNjY2NjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+SW1hZ2UgR2VuZXJhdGlvbiBGYWlsZWQ8L3RleHQ+PC9zdmc+";
         }
     }, $html);
 }
