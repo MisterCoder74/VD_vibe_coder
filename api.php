@@ -66,6 +66,59 @@ function generateId($length = 8) {
     return substr(str_shuffle(str_repeat('0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ', mt_rand(1, 10))), 1, $length);
 }
 
+function openai_image_call($prompt, $apiKey) {
+    $payload = [
+        "model" => "gpt-image-1-mini",
+        "prompt" => $prompt,
+        "n" => 1,
+        "size" => "1024x1024",
+        "response_format" => "url"
+    ];
+    $ch = curl_init("https://api.openai.com/v1/images/generations");
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            "Content-Type: application/json",
+            "Authorization: Bearer $apiKey"
+        ],
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload)
+    ]);
+    $resp = curl_exec($ch);
+    if (curl_errno($ch)) {
+        return ['error' => curl_error($ch)];
+    }
+    curl_close($ch);
+    return json_decode($resp, true);
+}
+
+function processImages($html, $clientId, $apiKey) {
+    $pattern = '/IMAGE_PROMPT:\s*([^<"\']+)/i';
+    if (preg_match_all($pattern, $html, $matches)) {
+        $assetsDir = __DIR__ . "/users/$clientId/assets";
+        if (!file_exists($assetsDir)) mkdir($assetsDir, 0755, true);
+        
+        foreach ($matches[1] as $index => $promptText) {
+            $fullMatch = $matches[0][$index];
+            $prompt = trim($promptText);
+            $resp = openai_image_call($prompt, $apiKey);
+            
+            if (isset($resp['data'][0]['url'])) {
+                $imageUrl = $resp['data'][0]['url'];
+                $imageContent = file_get_contents($imageUrl);
+                if ($imageContent !== false) {
+                    $filename = "img_" . substr(md5($prompt . time() . $index), 0, 8) . ".png";
+                    file_put_contents("$assetsDir/$filename", $imageContent);
+                    
+                    $localPath = "users/$clientId/assets/$filename";
+                    $html = str_replace($fullMatch, $localPath, $html);
+                }
+            }
+        }
+    }
+    return $html;
+}
+
 // --- Auth Check for protected actions ---
 $protectedActions = ['get_credits', 'save_api_key', 'decompose', 'execute_single_task', 'assemble_final', 'save_tasks', 'get_microapps', 'delete_microapp', 'deploy', 'download_microapp_zip'];
 if (in_array($action, $protectedActions)) {
@@ -172,6 +225,7 @@ switch ($action) {
 
         $systemPrompt = "You are an assistant that decomposes a web development request into sequential micro-tasks.
         $contextInstruction
+        If the user wants images, include a task to generate them using IMAGE_PROMPT: <description> syntax.
         Break into max 6 concise tasks. Respond only in JSON array format: [{\"id\":1,\"task\":\"...\"}].";
 
         $payload = [
@@ -215,6 +269,7 @@ switch ($action) {
 
         $sys = "You are developing a webpage for: \"$context\". Subtask: \"$task\".
         Generate only HTML/CSS/JS/PHP code fragment. No explanations. No markdown.
+        When you need an image, use the placeholder IMAGE_PROMPT: <description of the image>. For example: <img src=\"IMAGE_PROMPT: a beautiful sunset\">.
         $prevContext";
 
         $resp = openai_call([
@@ -228,6 +283,7 @@ switch ($action) {
         if (isset($resp['error'])) { echo json_encode($resp); exit; }
 
         $raw = trim($resp['choices'][0]['message']['content'] ?? '');
+        $raw = processImages($raw, $clientId, $apiKey);
         $totalTokens = $resp['usage']['total_tokens'] ?? 0;
         updateCredits($clientId, $totalTokens);
 
@@ -263,6 +319,7 @@ switch ($action) {
         if (isset($resp['error'])) { echo json_encode($resp); exit; }
 
         $raw = $resp['choices'][0]['message']['content'] ?? '';
+        $raw = processImages($raw, $clientId, $apiKey);
         if (preg_match('/<!DOCTYPE html[\s\S]*<\/html>/i', $raw, $m)) {
             $html = $m[0];
         } else {
@@ -332,6 +389,21 @@ switch ($action) {
         $appDir = __DIR__ . "/users/$clientId/microapps/$appId";
         mkdir($appDir, 0755, true);
         
+        // Handle assets
+        $assetsDir = __DIR__ . "/users/$clientId/assets";
+        if (file_exists($assetsDir)) {
+            $appAssetsDir = "$appDir/assets";
+            mkdir($appAssetsDir, 0755, true);
+            $files = scandir($assetsDir);
+            foreach ($files as $file) {
+                if ($file !== '.' && $file !== '..') {
+                    copy("$assetsDir/$file", "$appAssetsDir/$file");
+                }
+            }
+            // Update references in frontend code from preview paths to local assets paths
+            $frontend = str_replace("users/$clientId/assets/", "assets/", $frontend);
+        }
+        
         file_put_contents("$appDir/index.html", $frontend);
         file_put_contents("$appDir/backend.php", $backend);
         
@@ -367,6 +439,18 @@ switch ($action) {
         if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) === TRUE) {
             if (file_exists("$appDir/index.html")) $zip->addFile("$appDir/index.html", "index.html");
             if (file_exists("$appDir/backend.php")) $zip->addFile("$appDir/backend.php", "backend.php");
+            
+            $appAssetsDir = "$appDir/assets";
+            if (file_exists($appAssetsDir)) {
+                $zip->addEmptyDir("assets");
+                $files = scandir($appAssetsDir);
+                foreach ($files as $file) {
+                    if ($file !== '.' && $file !== '..') {
+                        $zip->addFile("$appAssetsDir/$file", "assets/$file");
+                    }
+                }
+            }
+            
             $zip->close();
             
             $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
