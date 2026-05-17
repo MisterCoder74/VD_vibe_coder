@@ -71,7 +71,8 @@ function openai_image_call($prompt, $apiKey) {
         "model" => "gpt-image-1-mini",
         "prompt" => $prompt,
         "n" => 1,
-        "size" => "1024x1024",
+        "size" => "1536x1024",
+        "quality" => "low",
         "response_format" => "url"
     ];
     $ch = curl_init("https://api.openai.com/v1/images/generations");
@@ -93,30 +94,37 @@ function openai_image_call($prompt, $apiKey) {
 }
 
 function processImages($html, $clientId, $apiKey) {
-    $pattern = '/IMAGE_PROMPT:\s*([^<"\']+)/i';
-    if (preg_match_all($pattern, $html, $matches)) {
-        $assetsDir = __DIR__ . "/users/$clientId/assets";
-        if (!file_exists($assetsDir)) mkdir($assetsDir, 0755, true);
+    $pattern = '/IMAGE_PROMPT:\s*([^<"\'\s][^<"\'\r\n]*)/i';
+    $assetsDir = __DIR__ . "/users/$clientId/assets";
+    if (!file_exists($assetsDir)) mkdir($assetsDir, 0755, true);
+
+    return preg_replace_callback($pattern, function($matches) use ($clientId, $apiKey, $assetsDir) {
+        $prompt = trim($matches[1]);
+        // Mandatory Suffix
+        $enhancedPrompt = $prompt . ", high quality, professional photography style";
         
-        foreach ($matches[1] as $index => $promptText) {
-            $fullMatch = $matches[0][$index];
-            $prompt = trim($promptText);
-            $resp = openai_image_call($prompt, $apiKey);
-            
-            if (isset($resp['data'][0]['url'])) {
-                $imageUrl = $resp['data'][0]['url'];
-                $imageContent = file_get_contents($imageUrl);
-                if ($imageContent !== false) {
-                    $filename = "img_" . substr(md5($prompt . time() . $index), 0, 8) . ".png";
-                    file_put_contents("$assetsDir/$filename", $imageContent);
-                    
-                    $localPath = "users/$clientId/assets/$filename";
-                    $html = str_replace($fullMatch, $localPath, $html);
-                }
-            }
+        $resp = openai_image_call($enhancedPrompt, $apiKey);
+        
+        $imageContent = null;
+        if (isset($resp['data'][0]['url'])) {
+            $imageContent = @file_get_contents($resp['data'][0]['url']);
+        } elseif (isset($resp['data'][0]['b64_json'])) {
+            $imageContent = base64_decode($resp['data'][0]['b64_json']);
         }
-    }
-    return $html;
+
+        if ($imageContent) {
+            $filename = "img_" . substr(md5($prompt . time() . rand()), 0, 8) . ".png";
+            file_put_contents("$assetsDir/$filename", $imageContent);
+            return "users/$clientId/assets/$filename";
+        } else {
+            // Logging and fallback
+            $errorMsg = isset($resp['error']['message']) ? $resp['error']['message'] : (isset($resp['error']) ? json_encode($resp['error']) : 'Unknown error');
+            $logEntry = "[" . date('Y-m-d H:i:s') . "] Image Gen Error for prompt '$prompt': " . $errorMsg . " Response: " . json_encode($resp) . "\n";
+            @file_put_contents(__DIR__ . "/error_log.txt", $logEntry, FILE_APPEND);
+            
+            return "https://via.placeholder.com/1536x1024?text=Image+Generation+Failed";
+        }
+    }, $html);
 }
 
 // --- Auth Check for protected actions ---
